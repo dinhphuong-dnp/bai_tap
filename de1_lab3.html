@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lab 3 - Runner Monitoring</title>
+    <!-- Thư viện MQTT.js và Chart.js từ CDN -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg: #0b1020;
+            --bg-2: #121a33;
+            --panel: rgba(255, 255, 255, 0.05);
+            --panel-border: rgba(255, 255, 255, 0.10);
+            --text: #e8ecf8;
+            --muted: #8d98b8;
+            --temp: #ff6b6b;
+            --pressure: #ffd166;
+            --altitude: #4cc9f0;
+            --green: #2fd18b;
+            --red: #ff5470;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
+            color: var(--text);
+            min-height: 100vh;
+            padding: 32px 20px 48px;
+            background:
+                radial-gradient(900px 500px at 10% -10%, rgba(76, 201, 240, 0.18), transparent 60%),
+                radial-gradient(800px 500px at 100% 0%, rgba(255, 107, 107, 0.14), transparent 60%),
+                linear-gradient(180deg, var(--bg), var(--bg-2));
+            background-attachment: fixed;
+        }
+
+        .container { max-width: 1100px; margin: 0 auto; }
+
+        /* ---------- Header ---------- */
+        header { text-align: center; margin-bottom: 28px; }
+        header .tag {
+            display: inline-block;
+            font-size: 12px; letter-spacing: 2px; font-weight: 600;
+            color: var(--altitude);
+            padding: 6px 14px; border-radius: 999px;
+            background: rgba(76, 201, 240, 0.10);
+            border: 1px solid rgba(76, 201, 240, 0.30);
+            margin-bottom: 14px;
+        }
+        h1 {
+            font-size: clamp(22px, 4vw, 34px);
+            font-weight: 800; letter-spacing: 0.5px;
+            background: linear-gradient(90deg, #ffffff, #9fb4ff 60%, #4cc9f0);
+            -webkit-background-clip: text; background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .subtitle { color: var(--muted); margin-top: 8px; font-size: 14px; }
+
+        .status-bar {
+            display: inline-flex; align-items: center; gap: 10px;
+            margin-top: 18px; padding: 9px 18px;
+            border-radius: 999px; font-size: 14px;
+            background: var(--panel); border: 1px solid var(--panel-border);
+            backdrop-filter: blur(10px);
+        }
+        .status-bar .dot {
+            width: 10px; height: 10px; border-radius: 50%;
+            background: var(--muted);
+        }
+        .connection-tools {
+            display: flex; justify-content: center; align-items: end; gap: 10px;
+            flex-wrap: wrap; margin-top: 14px;
+        }
+        .connection-tools label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; text-align: left; }
+        .connection-tools input {
+            min-width: 220px; padding: 10px 12px; border-radius: 10px;
+            border: 1px solid var(--panel-border); background: rgba(8, 13, 28, .7);
+            color: var(--text); font: inherit;
+        }
+        .connection-tools .btn { min-height: 40px; padding: 10px 16px; }
+        .connection-tools .btn:disabled, .btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+        #mqtt-status { font-weight: 700; }
+        .connected { color: var(--green); }
+        .disconnected { color: var(--red); }
+        .status-bar.ok .dot { background: var(--green); box-shadow: 0 0 0 0 rgba(47, 209, 139, 0.7); animation: pulse 1.8s infinite; }
+        .status-bar.bad .dot { background: var(--red); }
+
+        @keyframes pulse {
+            0%   { box-shadow: 0 0 0 0 rgba(47, 209, 139, 0.6); }
+            70%  { box-shadow: 0 0 0 10px rgba(47, 209, 139, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(47, 209, 139, 0); }
+        }
+
+        /* ---------- Cards ---------- */
+        .card-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 20px; margin-bottom: 24px;
+        }
+        .card {
+            position: relative; overflow: hidden;
+            padding: 24px 22px; border-radius: 20px;
+            background: var(--panel);
+            border: 1px solid var(--panel-border);
+            backdrop-filter: blur(12px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+            transition: transform 0.25s ease, border-color 0.25s ease;
+        }
+        .card:hover { transform: translateY(-4px); border-color: rgba(255, 255, 255, 0.22); }
+        .card::before {
+            content: ""; position: absolute; inset: 0 0 auto 0; height: 4px;
+            background: var(--accent);
+        }
+        .card::after {
+            content: ""; position: absolute; right: -40px; top: -40px;
+            width: 140px; height: 140px; border-radius: 50%;
+            background: var(--accent); opacity: 0.10; filter: blur(6px);
+        }
+        .card.t { --accent: var(--temp); }
+        .card.p { --accent: var(--pressure); }
+        .card.a { --accent: var(--altitude); }
+
+        .card .icon {
+            width: 46px; height: 46px; border-radius: 14px;
+            display: grid; place-items: center; font-size: 24px;
+            background: color-mix(in srgb, var(--accent) 18%, transparent);
+            margin-bottom: 14px;
+        }
+        .card h3 {
+            font-size: 13px; font-weight: 600; letter-spacing: 1px;
+            text-transform: uppercase; color: var(--muted); margin-bottom: 8px;
+        }
+        .val-temp, .val-pressure, .val-altitude {
+            font-size: 38px; font-weight: 800; line-height: 1.1;
+            color: var(--accent); font-variant-numeric: tabular-nums;
+        }
+        .card .hint { margin-top: 8px; font-size: 12px; color: var(--muted); }
+
+        /* ---------- Control panel ---------- */
+        .control-panel {
+            padding: 24px; margin-bottom: 24px; border-radius: 20px;
+            background: var(--panel); border: 1px solid var(--panel-border);
+            backdrop-filter: blur(12px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        }
+        .control-panel h2 {
+            font-size: 15px; letter-spacing: 1.5px; font-weight: 700;
+            color: var(--muted); margin-bottom: 18px; text-align: center;
+        }
+        .btn-group {
+            display: grid; gap: 14px;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        }
+        .btn {
+            display: flex; align-items: center; justify-content: center; gap: 8px;
+            padding: 14px 18px; font-size: 15px; font-weight: 700;
+            border-radius: 14px; cursor: pointer; color: #fff;
+            border: 1px solid transparent; font-family: inherit;
+            transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.2s ease;
+        }
+        .btn:hover { transform: translateY(-2px); filter: brightness(1.1); }
+        .btn:active { transform: translateY(0) scale(0.97); }
+        .btn-on {
+            background: linear-gradient(135deg, #1fbf7a, #2fd18b);
+            box-shadow: 0 6px 18px rgba(47, 209, 139, 0.30);
+        }
+        .btn-off {
+            background: linear-gradient(135deg, #e83e5c, #ff5470);
+            box-shadow: 0 6px 18px rgba(255, 84, 112, 0.30);
+        }
+        .btn-neutral {
+            background: linear-gradient(135deg, #49536d, #66718e);
+            box-shadow: 0 6px 18px rgba(73, 83, 109, 0.25);
+        }
+        #toast {
+            margin-top: 16px; text-align: center; min-height: 20px;
+            font-size: 13px; color: var(--altitude); opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        #toast.show { opacity: 1; }
+
+        /* ---------- Charts ---------- */
+        .charts-container {
+            display: grid; gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        }
+        .chart-box {
+            padding: 20px; border-radius: 20px;
+            background: var(--panel); border: 1px solid var(--panel-border);
+            backdrop-filter: blur(12px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        }
+        .chart-box h3 { font-size: 14px; font-weight: 700; margin-bottom: 12px; color: var(--text); }
+        .chart-wrap { position: relative; height: 280px; }
+
+        footer { text-align: center; margin-top: 32px; color: var(--muted); font-size: 12px; }
+
+        @media (max-width: 600px) {
+            body { padding: 20px 14px 36px; }
+            .val-temp, .val-pressure, .val-altitude { font-size: 32px; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <header>
+        <span class="tag">LAB 3 · ESP32 · BMP180 · MQTT</span>
+        <h1>HỆ THỐNG GIÁM SÁT VÀ CẢNH BÁO RUNNER</h1>
+        <p class="subtitle">Dữ liệu cảm biến theo thời gian thực</p>
+        <div class="status-bar" id="status-bar">
+            <span class="dot"></span>
+            <span>MQTT Broker: <span id="mqtt-status" class="disconnected">Đang kết nối...</span></span>
+        </div>
+        <div class="connection-tools">
+            <label for="device-id">Mã thiết bị
+                <input id="device-id" value="runner_nhom01" autocomplete="off">
+            </label>
+            <button class="btn btn-neutral" id="connect-button" type="button">Kết nối MQTT</button>
+        </div>
+    </header>
+
+    <!-- 1. CÁC THẺ HIỂN THỊ DỮ LIỆU (giữ nguyên class) -->
+    <div class="card-container">
+        <div class="card t">
+            <div class="icon">🌡️</div>
+            <h3>Nhiệt Độ Runner</h3>
+            <div class="val-temp">-- °C</div>
+            <div class="hint">Cảm biến BMP180</div>
+        </div>
+        <div class="card p">
+            <div class="icon">🌀</div>
+            <h3>Áp Lực Khí Quyển</h3>
+            <div class="val-pressure">-- hPa</div>
+            <div class="hint">Áp suất không khí</div>
+        </div>
+        <div class="card a">
+            <div class="icon">⛰️</div>
+            <h3>Độ Cao (So mực nước biển)</h3>
+            <div class="val-altitude">-- m</div>
+            <div class="hint">Tính từ áp suất</div>
+        </div>
+    </div>
+
+    <!-- 2. ĐIỀU KHIỂN THỦ CÔNG -->
+    <div class="control-panel">
+        <h2>ĐIỀU KHIỂN THỦ CÔNG</h2>
+        <div class="btn-group">
+            <button class="btn btn-off" id="led-control" type="button" aria-pressed="false" disabled>💡 LED: TẮT</button>
+            <button class="btn btn-off" id="buzzer-control" type="button" aria-pressed="false" disabled>🔔 Còi: TẮT</button>
+        </div>
+        <div id="toast"></div>
+    </div>
+
+    <!-- 3. BIỂU ĐỒ REAL-TIME -->
+    <div class="charts-container">
+        <div class="chart-box">
+            <h3>📈 Nhiệt độ theo thời gian</h3>
+            <div class="chart-wrap"><canvas id="tempChart"></canvas></div>
+        </div>
+        <div class="chart-box">
+            <h3>📈 Độ cao theo thời gian</h3>
+            <div class="chart-wrap"><canvas id="altChart"></canvas></div>
+        </div>
+    </div>
+
+    <footer>Runner Monitoring · MQTT over WebSocket</footer>
+</div>
+
+<script>
+    // Cấu hình MQTT. Device ID phải giống DEVICE_ID trong firmware ESP32.
+    const brokerUrl = 'wss://broker.hivemq.com:8884/mqtt';
+    const statusEl = document.getElementById('mqtt-status');
+    const statusBar = document.getElementById('status-bar');
+    const deviceInput = document.getElementById('device-id');
+    const connectButton = document.getElementById('connect-button');
+    const ledButton = document.getElementById('led-control');
+    const buzzerButton = document.getElementById('buzzer-control');
+    const toastEl = document.getElementById('toast');
+
+    let client = null;
+    let topics = null;
+    let ledIsOn = false;
+    let buzzerIsOn = false;
+    let toastTimer;
+
+    function setStatus(text, state) {
+        statusEl.innerText = text;
+        statusEl.className = state === 'ok' ? 'connected' : 'disconnected';
+        statusBar.className = 'status-bar ' + (state || 'bad');
+    }
+
+    function showToast(text) {
+        toastEl.innerText = text;
+        toastEl.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2400);
+    }
+
+    function setControlsEnabled(enabled) {
+        ledButton.disabled = !enabled;
+        buzzerButton.disabled = !enabled;
+    }
+
+    function drawControlButton(button, isOn, label, icon) {
+        button.innerText = `${icon} ${label}: ${isOn ? 'BẬT' : 'TẮT'}`;
+        button.classList.toggle('btn-on', isOn);
+        button.classList.toggle('btn-off', !isOn);
+        button.setAttribute('aria-pressed', String(isOn));
+    }
+
+    function connectMqtt() {
+        const deviceId = deviceInput.value.trim();
+        if (!/^[a-zA-Z0-9_-]+$/.test(deviceId)) {
+            setStatus('Mã thiết bị không hợp lệ', 'bad');
+            return;
+        }
+
+        topics = {
+            data: `runner/${deviceId}/telemetry`,
+            led: `runner/${deviceId}/cmd/led`,
+            buzzer: `runner/${deviceId}/cmd/buzzer`
+        };
+
+        setStatus('Đang kết nối...', 'bad');
+        connectButton.innerText = 'Đang kết nối...';
+        client = mqtt.connect(brokerUrl, {
+            clientId: `runner-web-${Math.random().toString(16).slice(2, 10)}`,
+            clean: true,
+            connectTimeout: 8000,
+            reconnectPeriod: 2500
+        });
+
+        client.on('connect', () => {
+            setStatus('Đã kết nối!', 'ok');
+            connectButton.innerText = 'Ngắt kết nối';
+            setControlsEnabled(true);
+            client.subscribe(topics.data, (error) => {
+                if (error) showToast('Không đăng ký được topic dữ liệu.');
+            });
+        });
+        client.on('offline', () => setStatus('Mất kết nối!', 'bad'));
+        client.on('close', () => {
+            setStatus('Mất kết nối!', 'bad');
+            setControlsEnabled(false);
+            connectButton.innerText = 'Kết nối MQTT';
+        });
+        client.on('reconnect', () => setStatus('Đang kết nối lại...', 'bad'));
+        client.on('error', (error) => {
+            console.error('Lỗi MQTT:', error);
+            setStatus('Lỗi kết nối MQTT', 'bad');
+        });
+        client.on('message', handleTelemetry);
+    }
+
+    connectButton.addEventListener('click', () => {
+        if (client) {
+            client.end(true);
+            client = null;
+            topics = null;
+            setControlsEnabled(false);
+            connectButton.innerText = 'Kết nối MQTT';
+            setStatus('Đã ngắt kết nối', 'bad');
+        } else {
+            connectMqtt();
+        }
+    });
+
+    // Biểu đồ giữ 30 mẫu gần nhất.
+    Chart.defaults.color = '#8d98b8';
+    Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
+
+    function makeChart(canvasId, label, color, fillColor) {
+        return new Chart(document.getElementById(canvasId), {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label, data: [], borderColor: color, backgroundColor: fillColor,
+                    borderWidth: 3, fill: true, tension: 0.35, pointRadius: 2,
+                    pointHoverRadius: 5, pointBackgroundColor: color,
+                    pointBorderColor: '#0b1020', pointBorderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: { duration: 250 },
+                interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: { labels: { usePointStyle: true, boxWidth: 8 } },
+                    tooltip: {
+                        backgroundColor: 'rgba(11, 16, 32, 0.95)',
+                        borderColor: color, borderWidth: 1, padding: 10
+                    }
+                },
+                scales: {
+                    x: { grid: { color: 'rgba(255,255,255,0.05)' } },
+                    y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.07)' } }
+                }
+            }
+        });
+    }
+
+    const tempChart = makeChart('tempChart', 'Nhiệt độ (°C)', '#ff6b6b', 'rgba(255, 107, 107, 0.15)');
+    const altChart = makeChart('altChart', 'Độ cao (m)', '#4cc9f0', 'rgba(76, 201, 240, 0.15)');
+
+    function appendPoint(chart, time, value) {
+        if (chart.data.labels.length >= 30) {
+            chart.data.labels.shift();
+            chart.data.datasets[0].data.shift();
+        }
+        chart.data.labels.push(time);
+        chart.data.datasets[0].data.push(value);
+        chart.update();
+    }
+
+    // Nhận gói JSON từ topic telemetry. Hỗ trợ cả tên khóa tiếng Việt
+    // và tiếng Anh để tương thích với các phiên bản firmware khác nhau.
+    function handleTelemetry(topic, message) {
+        if (!topics || topic !== topics.data) return;
+
+        try {
+            const data = JSON.parse(message.toString());
+            const temperature = Number(data.temperature_c ?? data.temp ?? data['nhiệt độ']);
+            const pressure = Number(data.pressure_hpa ?? data.pressure ?? data['áp suất']);
+            const altitude = Number(data.altitude_m ?? data.altitude ?? data['độ cao']);
+
+            if (![temperature, pressure, altitude].every(Number.isFinite)) {
+                throw new Error('JSON thiếu trường nhiệt độ, áp suất hoặc độ cao.');
+            }
+
+            document.querySelector('.val-temp').innerText = temperature.toFixed(1) + ' °C';
+            document.querySelector('.val-pressure').innerText = pressure.toFixed(1) + ' hPa';
+            document.querySelector('.val-altitude').innerText = altitude.toFixed(1) + ' m';
+
+            const timeLabel = new Date().toLocaleTimeString();
+            appendPoint(tempChart, timeLabel, temperature);
+            appendPoint(altChart, timeLabel, altitude);
+
+            const alarm = temperature > 40 || temperature < 20;
+            if (alarm) {
+                showToast('⚠ Nhiệt độ ngoài ngưỡng cảnh báo!');
+            }
+        } catch (error) {
+            console.error('Lỗi đọc dữ liệu MQTT:', error);
+            showToast('Dữ liệu nhận được không đúng định dạng.');
+        }
+    }
+
+    function toggleOutput(kind) {
+        if (!client || !client.connected || !topics) {
+            showToast('Hãy kết nối MQTT trước.');
+            return;
+        }
+
+        const isLed = kind === 'led';
+        const nextState = isLed ? !ledIsOn : !buzzerIsOn;
+        const topic = isLed ? topics.led : topics.buzzer;
+        const payload = nextState ? 'ON' : 'OFF';
+
+        client.publish(topic, payload, { qos: 0 }, (error) => {
+            if (error) {
+                showToast('Gửi lệnh thất bại.');
+                return;
+            }
+
+            if (isLed) {
+                ledIsOn = nextState;
+                drawControlButton(ledButton, ledIsOn, 'LED', '💡');
+            } else {
+                buzzerIsOn = nextState;
+                drawControlButton(buzzerButton, buzzerIsOn, 'Còi', '🔔');
+            }
+            showToast(`Đã gửi lệnh ${isLed ? 'LED' : 'còi'} ${payload}.`);
+        });
+    }
+
+    ledButton.addEventListener('click', () => toggleOutput('led'));
+    buzzerButton.addEventListener('click', () => toggleOutput('buzzer'));
+    drawControlButton(ledButton, false, 'LED', '💡');
+    drawControlButton(buzzerButton, false, 'Còi', '🔔');
+</script>
+</body>
+</html>
